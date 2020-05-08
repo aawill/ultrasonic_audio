@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""Pass input directly to output.
-
-https://app.assembla.com/spaces/portaudio/git/source/master/test/patest_wire.c
-
-"""
 import argparse
 import sys
 import time
@@ -13,19 +8,13 @@ import numpy as np
 from scipy.signal import hilbert
 from scipy.interpolate import interp1d
 from matplotlib import pyplot as plt
-import librosa
-from pyrubberband import pyrb
-import soundfile as sf
+# ~ import librosa
+# ~ from pyrubberband import pyrb
+# ~ import soundfile as sf
+
+import RPi.GPIO as GPIO
 
 
-parser = argparse.ArgumentParser(add_help=False)
-parser.add_argument(
-    '-l', '--list-devices', action='store_true',
-    help='show list of audio devices and exit')
-args, remaining = parser.parse_known_args()
-if args.list_devices:
-    print(sd.query_devices())
-    parser.exit(0)
 
 class DSPTesting:
     def __init__(self, device, sample_rate, buffer_size, dtype, channels):
@@ -34,9 +23,9 @@ class DSPTesting:
         self.buffer_size = buffer_size
         self.dtype = dtype
         self.channels = channels
-        self.iostream = sd.Stream(device=None, samplerate=self.sample_rate,
+        self.iostream = sd.Stream(device=self.device, samplerate=self.sample_rate,
                                   blocksize=self.buffer_size, dtype=self.dtype,
-                                  latency='low', channels=self.channels,
+                                  latency='high', channels=self.channels,
                                   callback=self.callback)
         # create empty arrays to store processed audio for plotting
         self.input_data = np.array([], dtype=np.int16)
@@ -52,6 +41,17 @@ class DSPTesting:
         self.sample_num = 0
         # stores 4 seconds of audio
         self.circular_buffer = np.zeros(self.sample_rate * 4)
+        
+        # ultrasonic sensor setup
+        GPIO.setmode(GPIO.BCM)
+        self.MAX_DIST = 45
+        self.dist1 = self.MAX_DIST
+        self.GPIO_TRIGGER = 17
+        self.GPIO_ECHO = 27
+        GPIO.setup(self.GPIO_TRIGGER, GPIO.OUT)
+        GPIO.setup(self.GPIO_ECHO, GPIO.IN)
+        # allows readings of up to about 43 cm
+        self.timeout = 0.0025
 
     def start_stream(self):
         self.iostream.start()
@@ -60,6 +60,9 @@ class DSPTesting:
         """function to process audio buffers as they become available"""
         if status: 
             print('status:', status)
+
+        self.dist1 = self.read_sensors()
+        print('dist:', self.dist1)
 
         # generates a sine wave
         # t = (self.sine_start_idx + np.arange(len(indata))) / self.sample_rate
@@ -223,55 +226,84 @@ class DSPTesting:
         axs[1].plot(output_time_axis, float_output)
 
         plt.show()
-
+        
+    def read_sensors(self):
+        # set Trigger to HIGH
+        GPIO.output(self.GPIO_TRIGGER, True)
+     
+        # set Trigger after 0.01ms to LOW
+        time.sleep(0.00001)
+        GPIO.output(self.GPIO_TRIGGER, False)
+     
+        StartTime = time.time()
+        StopTime = time.time()
+     
+        # save StartTime
+        while GPIO.input(self.GPIO_ECHO) == 0:
+            StartTime = time.time()
+     
+        # save time of arrival
+        while GPIO.input(self.GPIO_ECHO) == 1 and time.time() - StartTime < self.timeout:
+            StopTime = time.time()
+     
+        # time difference between start and arrival
+        TimeElapsed = StopTime - StartTime
+        # multiply with the sonic speed (34300 cm/s)
+        # and divide by 2, because there and back
+        distance = (TimeElapsed * 34300) / 2
+     
+        return distance
 
 try:
-    input_device = 'Focusrite USB 2.0 Audio Driver'
-    output_device = 'Focusrite USB 2.0 Audio Driver'
+    input_device = 'AudioInjector'
+    output_device = 'AudioInjector'
 
     tester = DSPTesting((input_device, output_device), 44100, 0, np.int16, (1, 2))
 
-    # tester.start_stream()
-    # print('#' * 80)
-    # print('press Return to quit')
-    # print('#' * 80)
-    # input()
+    tester.start_stream()
+    print('#' * 80)
+    print('press Return to quit')
+    print('#' * 80)
+    input()
+    
+    print('done')
+    GPIO.cleanup()
 
-    chunk_size = 1024
-    num_chunks = 20
-    sine_freq = 200
-    amplitude = 0.2
-    t = np.arange(chunk_size * num_chunks) / tester.sample_rate
-    sig = (amplitude * np.sin(2 * np.pi * sine_freq * t)).reshape(-1, 1)
-    chunks = np.split(sig, num_chunks)
+#     chunk_size = 1024
+#     num_chunks = 20
+#     sine_freq = 200
+#     amplitude = 0.2
+#     t = np.arange(chunk_size * num_chunks) / tester.sample_rate
+#     sig = (amplitude * np.sin(2 * np.pi * sine_freq * t)).reshape(-1, 1)
+#     chunks = np.split(sig, num_chunks)
 
-    pyrb_shift_offline = tester.pyrb_pitch_shift(sig)
-    librosa_shift_offline = tester.librosa_pitch_shift(sig)
-    custom_shift_offline = tester.custom_pitch_shift(sig)
+#     pyrb_shift_offline = tester.pyrb_pitch_shift(sig)
+#     librosa_shift_offline = tester.librosa_pitch_shift(sig)
+#     custom_shift_offline = tester.custom_pitch_shift(sig)
 
-    pyrb_shift_chunks = np.array([])
-    librosa_shift_chunks = np.array([])
-    custom_shift_chunks = np.array([])
-    custom_lin_smoothed_chunks = np.array([])
-    custom_exp_smoothed_chunks = np.array([])
-    for chunk in chunks:
-        pyrb_shift_chunks = np.append(pyrb_shift_chunks, tester.pyrb_pitch_shift(chunk))
-        librosa_shift_chunks = np.append(librosa_shift_chunks, tester.librosa_pitch_shift(chunk))
-        custom_chunk = tester.custom_pitch_shift(chunk)
-        custom_shift_chunks = np.append(custom_shift_chunks, custom_chunk)
-        custom_lin_smoothed_chunks = np.append(custom_lin_smoothed_chunks, tester.smooth_chunk(custom_chunk))
-        custom_exp_smoothed_chunks = np.append(custom_exp_smoothed_chunks, tester.smooth_chunk(custom_chunk, expSmoothing=True))
+#     pyrb_shift_chunks = np.array([])
+#     librosa_shift_chunks = np.array([])
+#     custom_shift_chunks = np.array([])
+#     custom_lin_smoothed_chunks = np.array([])
+#     custom_exp_smoothed_chunks = np.array([])
+#     for chunk in chunks:
+#         #pyrb_shift_chunks = np.append(pyrb_shift_chunks, tester.pyrb_pitch_shift(chunk))
+#         #librosa_shift_chunks = np.append(librosa_shift_chunks, tester.librosa_pitch_shift(chunk))
+#         custom_chunk = tester.custom_pitch_shift(chunk)
+#         custom_shift_chunks = np.append(custom_shift_chunks, custom_chunk)
+#         custom_lin_smoothed_chunks = np.append(custom_lin_smoothed_chunks, tester.smooth_chunk(custom_chunk))
+#         custom_exp_smoothed_chunks = np.append(custom_exp_smoothed_chunks, tester.smooth_chunk(custom_chunk, expSmoothing=True))
 
     # sf.write('soundfiles/custom_unsmoothed.wav', custom_shift_chunks, tester.sample_rate)
     # sf.write('soundfiles/custom_smoothed.wav', custom_smoothed_chunks, tester.sample_rate)
 
-    # _, axs0 = plt.subplots(3, sharex=True)
-    # axs0[0].set_title('unsmoothed signal')
-    # axs0[0].plot(custom_shift_chunks)
-    # axs0[1].set_title('linear smoothed signal')
-    # axs0[1].plot(custom_lin_smoothed_chunks)
-    # axs0[2].set_title('exp smoothed signal')
-    # axs0[2].plot(custom_exp_smoothed_chunks)
+#     _, axs0 = plt.subplots(3, sharex=True)
+#     axs0[0].set_title('unsmoothed signal')
+#     axs0[0].plot(custom_shift_chunks)
+#     axs0[1].set_title('linear smoothed signal')
+#     axs0[1].plot(custom_lin_smoothed_chunks)
+#     axs0[2].set_title('exp smoothed signal')
+#     axs0[2].plot(custom_exp_smoothed_chunks)
 
     # sf.write('soundfiles/original.wav', sig, tester.sample_rate)
     # sf.write('soundfiles/pyrb_shift_offline.wav', pyrb_shift_offline, tester.sample_rate)
@@ -281,37 +313,37 @@ try:
     # sf.write('soundfiles/custom_shift_offline.wav', custom_shift_offline, tester.sample_rate)
     # sf.write('soundfiles/custom_shift_buffered.wav', custom_shift_chunks, tester.sample_rate)
 
-    _, axs = plt.subplots(3, sharex=True)
-    axs[0].set_title('original signal')
-    axs[0].plot(sig)
-    axs[1].set_title('pitch-shifted signal (offline)')
-    axs[1].plot(pyrb_shift_offline)
-    axs[2].set_title('pitch-shifted signal (buffered)')
-    axs[2].plot(pyrb_shift_chunks)
-    axs[2].set_xlabel('time (samples)')
-    axs[2].set_ylabel('amplitude')
+#     _, axs = plt.subplots(3, sharex=True)
+#     axs[0].set_title('original signal')
+#     axs[0].plot(sig)
+#     axs[1].set_title('pitch-shifted signal (offline)')
+#     axs[1].plot(pyrb_shift_offline)
+#     axs[2].set_title('pitch-shifted signal (buffered)')
+#     axs[2].plot(pyrb_shift_chunks)
+#     axs[2].set_xlabel('time (samples)')
+#     axs[2].set_ylabel('amplitude')
+# 
+#     _, axs2 = plt.subplots(3, sharex=True)
+#     axs2[0].set_title('original signal')
+#     axs2[0].plot(sig)
+#     axs2[1].set_title('pitch-shifted signal (offline)')
+#     axs2[1].plot(librosa_shift_offline)
+#     axs2[2].set_title('pitch-shifted signal (buffered)')
+#     axs2[2].plot(librosa_shift_chunks)
+#     axs2[2].set_xlabel('time (samples)')
+#     axs2[2].set_ylabel('amplitude')
+# 
+#     _, axs3 = plt.subplots(3, sharex=True)
+#     axs3[0].set_title('original signal')
+#     axs3[0].plot(sig)
+#     axs3[1].set_title('pitch-shifted signal (offline)')
+#     axs3[1].plot(custom_shift_offline)
+#     axs3[2].set_title('pitch-shifted signal (buffered)')
+#     axs3[2].plot(custom_lin_smoothed_chunks)
+#     axs3[2].set_xlabel('time (samples)')
+#     axs3[2].set_ylabel('amplitude')
 
-    _, axs2 = plt.subplots(3, sharex=True)
-    axs2[0].set_title('original signal')
-    axs2[0].plot(sig)
-    axs2[1].set_title('pitch-shifted signal (offline)')
-    axs2[1].plot(librosa_shift_offline)
-    axs2[2].set_title('pitch-shifted signal (buffered)')
-    axs2[2].plot(librosa_shift_chunks)
-    axs2[2].set_xlabel('time (samples)')
-    axs2[2].set_ylabel('amplitude')
-
-    _, axs3 = plt.subplots(3, sharex=True)
-    axs3[0].set_title('original signal')
-    axs3[0].plot(sig)
-    axs3[1].set_title('pitch-shifted signal (offline)')
-    axs3[1].plot(custom_shift_offline)
-    axs3[2].set_title('pitch-shifted signal (buffered)')
-    axs3[2].plot(custom_lin_smoothed_chunks)
-    axs3[2].set_xlabel('time (samples)')
-    axs3[2].set_ylabel('amplitude')
-
-    plt.show()
+#     plt.show()
 
     # while True:
     #     data = tester.iostream.read(256)[0].transpose()[0]
@@ -333,6 +365,6 @@ try:
     #tester.plot_data()
 
 except KeyboardInterrupt:
-    parser.exit('')
-except Exception as e:
-    parser.exit(type(e).__name__ + ': ' + str(e))
+    print('stopped by user')
+    GPIO.cleanup()
+    
