@@ -1,10 +1,11 @@
 import alsaaudio as aa
 import numpy as np
 import struct
-import RPi.GPIO as GPIO
 from gpiozero import DistanceSensor
 import time
 import threading
+from scipy import signal
+from matplotlib import pyplot as plt
 
 
 class UltrasonicMusic:
@@ -41,13 +42,24 @@ class UltrasonicMusic:
         self.delay_gain = 0.4
 
         # stores 4 seconds of audio for use in delay effect
-        self.circular_buffer = np.zeros(self.adjusted_sample_rate * 4)  
+        self.circ_buff = np.zeros(self.adjusted_sample_rate * 4)  
         # location of read and write indices into circular buffer
-        self.read_idx = 0
+        self.delay_read_idx = 0
         self.write_idx = 0
         
         self.changing_delay = False
                       
+        self.doppler_read_idx = 0
+        t = np.linspace(0, self.buffer_size / self.sample_rate, self.buffer_size)
+        self.sawtooth = signal.sawtooth(2*np.pi*1040*t)
+        
+        
+        Bparam, Aparam = signal.iirfilter(2, 0.02,
+                                          btype='lowpass', analog=False, ftype='butter')
+        Z, P, K = signal.tf2zpk(Bparam, Aparam)
+        self.sos = signal.zpk2sos(Z, P, K)
+        self.sos_conditions = np.zeros((self.sos.shape[0], 2))
+        
         # ultrasonic sensor variables
         self.MAX_DIST = 0.35
         self.delay_dist_tolerance = 0.03
@@ -66,7 +78,6 @@ class UltrasonicMusic:
     def __del__(self):
         print('destructing')
         #self.sensor_thread.join()
-        GPIO.cleanup()
 
     def setup(self):
         """Prepare tester to run."""
@@ -76,7 +87,7 @@ class UltrasonicMusic:
         preload_data = struct.pack('%dh'%(len(preload_data)), *list(preload_data))
         self.output_device.write(preload_data)
         # start reading from sensors
-        self.sensor_thread.start()
+        #self.sensor_thread.start()
 
     def process(self, read_info):
         """
@@ -95,24 +106,178 @@ class UltrasonicMusic:
         indata = np.frombuffer(inbuffer, dtype=np.int16)
         # change to float for processing
         indata = np.array(indata, dtype=np.float64)
+        
+#         # apply delay. if the value of delay_samples has been changed this iteration,
+#         # additional processing is needed to avoid glitches in the output.
+#         if not self.changing_delay:
+#             indata = self.delay(indata, self.delay_samples)
+#         else:
+#             indata = self.delay(indata, self.delay_samples, crossfading=True)
+#             self.delay_samples = self.new_delay_samples
+#             self.changing_delay = False
+#         
+#         self.delayline_write(indata)
+#         
+#         
+#         # apply distortion
+#         indata = self.distortion(indata)
 
-        # apply delay. if the value of delay_samples has been changed this iteration,
-        # additional processing is needed to avoid glitches in the output.
-        if not self.changing_delay:
-            indata = self.delay(indata)
-        else:
-            indata = self.delay(indata, crossfading=True)
-            self.delay_samples = self.new_delay_samples
-            self.changing_delay = False
-
-        # apply distortion
-        indata = self.distortion(indata)
+        indata = self.lowpass(indata)
         
         # repack data into a writeable chunk
         outdata = indata.astype('int16')
         outdata = struct.pack('%dh'%(len(outdata)), *list(outdata))
         return outdata
     
+    def lowpass(self, indata):
+        outdata, self.sos_conditions = signal.sosfilt(self.sos, indata, zi=self.sos_conditions)
+        return outdata
+        
+    
+#     def pitch_shift(self, indata, shift):
+#         outdata = self.vec_delay(indata, self.sawtooth)
+        
+        
+#     def vec_delay(self, indata, delays):
+#         outdata = [self.delayline_read(
+        
+        
+#     def vec_delay_read(self, read_indices, length):
+#         int_indices = np.floor(read_indices)
+#         frac_indices = read_indices - int_indices
+        
+        
+    def delayline_read(self, read_idx, length):
+        """
+        Read past data from the delay line.
+        
+        Parameters:
+        read_idx (int): the index into self.circ_buff to start reading at
+        length (int): how much data to read. number of samples * 2
+        
+        Returns:
+        np.array('float64'): the past data
+        """
+        
+        if read_idx % 1 == 0:
+            read_idx = int(read_idx)
+            # read old data from buffer
+            delayed_data = self.circ_buff[read_idx:read_idx + length]
+            # see if we need to wrap around and add more data from the beginning
+            read_idx += length
+            if read_idx >= len(self.circ_buff):
+                read_idx -= len(self.circ_buff)
+                delayed_data = np.concatenate((delayed_data, self.circ_buff[:read_idx]))
+        
+        if read_idx % 1 != 0:
+            int_part = int(np.floor(read_idx))
+            frac_part = read_idx - int_part
+
+            pre_idx = int_part - 1
+            post_idx = int_part
+            if pre_idx < 0:
+                pre_idx = len(self.circ_buff) - 1
+            
+            pre_chunk1 = self.circ_buff[pre_idx:pre_idx + length]
+            pre_front = length - (len(self.circ_buff) - pre_idx)
+            delta = 0 if pre_front > 0 else pre_front
+            pre_chunk2 = self.circ_buff[delta:pre_front]
+            
+            pre_chunk = np.concatenate((pre_chunk1, pre_chunk2))
+                                        
+            post_chunk1 = self.circ_buff[post_idx:post_idx + length]
+            post_front = length - (len(self.circ_buff) - post_idx)
+            delta = 0 if post_front > 0 else post_front
+            post_chunk2 = self.circ_buff[delta:post_front]
+                            
+            post_chunk = np.concatenate((post_chunk1, post_chunk2))
+                
+            est_chunk = (pre_chunk - post_chunk) * frac_part + post_chunk
+            
+            delayed_data = est_chunk
+            
+        return delayed_data
+        
+    def delay(self, indata, delay_samples, crossfading=False):
+        """
+        Add delayed audio to an input signal.
+        
+        Parameters:
+        indata (np.array('float64')): the input data
+        crossfading (bool): whether or not the delay time is changing.
+                            if so, a crossfade is applied to smooth discontinuities.
+                            
+        Returns:
+        np.array('float64'): the input signal plus delayed audio
+        """
+        if delay_samples == 0:
+            return indata
+        
+        # make sure read index is in the right spot as delay time may have changed        
+        self.delay_read_idx = self.write_idx - delay_samples
+        if self.delay_read_idx < 0:
+            self.delay_read_idx += len(self.circ_buff)
+        
+        # read delayed data from buffer
+        delayed_data = self.delayline_read(self.delay_read_idx, len(indata))
+        
+        # add delayed data to input signal
+        if not crossfading:
+            outdata = indata + delayed_data * self.delay_gain
+        # if the delay time was changed this chunk, need to also get past data for new delay time
+        else:
+            new_read_idx = self.write_idx - self.new_delay_samples
+            if new_read_idx < 0:
+                new_read_idx += len(self.circ_buff)
+                
+            new_delayed_data = self.delayline_read(new_read_idx, len(indata))
+            
+            # fade out the old delay data, fade in the new
+            outdata_old = (indata + delayed_data * self.delay_gain) * \
+                          np.linspace(1, 0, len(indata))
+            outdata_new = (indata + new_delayed_data * self.delay_gain) * \
+                          np.linspace(0, 1, len(indata))
+            outdata = outdata_old + outdata_new
+        
+        # increment read pointer, check for overflow
+        self.delay_read_idx += len(indata)
+        if self.delay_read_idx >= len(self.circ_buff):
+            self.delay_read_idx -= len(self.circ_buff)
+            
+        return outdata
+    
+    def set_delay_samples(self, new_delay):
+        """
+        Setter for changing the delay time. Lets process() know things are changing.
+        
+        Parameters:
+        new_delay (int): the new delay time, in samples 
+        """
+        
+        self.new_delay_samples = new_delay
+        self.changing_delay = True
+        
+    def delayline_write(self, indata):
+        """
+        Write data to the delay line.
+        
+        Parameters:
+        write_idx (int): the index into self.circ_buff to start writing at
+        indata (np.array('float64')): the data to write
+        """
+        # if all the data we need is before the end of the buffer
+        if self.write_idx + len(indata) < len(self.circ_buff):            
+            self.circ_buff[self.write_idx:self.write_idx + len(indata)] = indata
+        # otherwise, wrap around and put whatever's left at the beginning
+        else:
+            space_remaining = len(self.circ_buff) - self.write_idx
+            self.circ_buff[self.write_idx:] = indata[:space_remaining]
+            self.circ_buff[:len(indata) - space_remaining] = indata[space_remaining:]
+            
+        self.write_idx += len(indata)
+        if self.write_idx >= len(self.circ_buff):
+            self.write_idx -= len(self.circ_buff)
+        
     def distortion(self, indata):
         """
         Apply wave shaping distortion to the input buffer.
@@ -140,105 +305,6 @@ class UltrasonicMusic:
         # return data to its original scale
         return outdata * np.iinfo(np.int16).max
     
-    def set_delay_samples(self, new_delay):
-        """
-        Setter for changing the delay time. Lets process() know things are changing.
-        
-        Parameters:
-        new_delay (int): the new delay time, in samples 
-        """
-        
-        self.new_delay_samples = new_delay
-        self.changing_delay = True
-        
-    def delayline_read(self, read_idx, length):
-        """
-        Read past data from the delay line.
-        
-        Parameters:
-        read_idx (int): the index into self.circular_buffer to start reading at
-        length (int): how much data to read. number of samples * 2
-        
-        Returns:
-        np.array('float64'): the past data
-        """
-        # read old data from buffer
-        delayed_data = self.circular_buffer[read_idx:read_idx + length]
-        # see if we need to wrap around and add more data from the beginning
-        read_idx += length
-        if read_idx >= len(self.circular_buffer):
-            read_idx -= len(self.circular_buffer)
-            delayed_data = np.concatenate((delayed_data, self.circular_buffer[:read_idx]))
-        return delayed_data
-        
-    def delayline_write(self, write_idx, indata):
-        """
-        Write data to the delay line.
-        
-        Parameters:
-        write_idx (int): the index into self.circular_buffer to start writing at
-        indata (np.array('float64')): the data to write
-        """
-        # if all the data we need is before the end of the buffer
-        if write_idx + len(indata) < len(self.circular_buffer):            
-            self.circular_buffer[write_idx:write_idx + len(indata)] = indata
-        # otherwise, wrap around and put whatever's left at the beginning
-        else:
-            space_remaining = len(self.circular_buffer) - write_idx
-            self.circular_buffer[write_idx:] = indata[:space_remaining]
-            self.circular_buffer[:len(indata) - space_remaining] = indata[space_remaining:]
-            
-    def delay(self, indata, crossfading=False):
-        """
-        Add delayed audio to an input signal.
-        
-        Parameters:
-        indata (np.array('float64')): the input data
-        crossfading (bool): whether or not the delay time is changing.
-                            if so, a crossfade is applied to smooth discontinuities.
-                            
-        Returns:
-        np.array('float64'): the input signal plus delayed audio
-        """
-        if self.delay_samples == 0:
-            return indata
-        
-        # make sure read index is in the right spot as delay time may have changed        
-        self.read_idx = self.write_idx - self.delay_samples
-        if self.read_idx < 0:
-            self.read_idx += len(self.circular_buffer)
-        
-        # read delayed data from buffer
-        delayed_data = self.delayline_read(self.read_idx, len(indata))
-        # write new data to buffer, plus old data for feedback
-        self.delayline_write(self.write_idx, indata + delayed_data * self.delay_gain)
-        
-        # add delayed data to input signal
-        if not crossfading:
-            outdata = indata + delayed_data * self.delay_gain
-        # if the delay time was changed this chunk, need to also get past data for new delay time
-        else:
-            new_read_idx = self.write_idx - self.new_delay_samples
-            if new_read_idx < 0:
-                new_read_idx += len(self.circular_buffer)
-                
-            new_delayed_data = self.delayline_read(new_read_idx, len(indata))
-            
-            # fade out the old delay data, fade in the new
-            outdata_old = (indata + delayed_data * self.delay_gain) * np.linspace(1, 0, len(indata))
-            outdata_new = (indata + new_delayed_data * self.delay_gain) * np.linspace(0, 1, len(indata))
-            outdata = outdata_old + outdata_new
-        
-        # increment pointers, check for overflow
-        self.write_idx += len(indata)
-        if self.write_idx >= len(self.circular_buffer):
-            self.write_idx -= len(self.circular_buffer)
-        self.read_idx += len(indata)
-        if self.read_idx >= len(self.circular_buffer):
-            self.read_idx -= len(self.circular_buffer)
-            
-        return outdata
-    
     def read_sensors(self):
         """
         Continuously poll the ultrasonic sensors for their current readings,
@@ -263,7 +329,7 @@ class UltrasonicMusic:
                 if delay_dist >= self.MAX_DIST:
                     self.set_delay_samples(0)
                 else:
-                    self.set_delay_samples(int(self.linear_scale(delay_dist,
+                    self.set_delay_samples((self.linear_scale(delay_dist,
                                                 self.DELAY_SECONDS_MIN,
                                                 self.adjusted_sample_rate * self.DELAY_SECONDS_MAX)))
                     
@@ -297,7 +363,17 @@ try:
         input_block = tester.input_device.read()
         processed_block = tester.process(input_block)
         tester.output_device.write(processed_block)
-        
+
+#     plt.plot(range(len(tester.sawtooth)), tester.sawtooth)
+#     plt.show()
+
+
+#     sine = np.sin(np.linspace(0, 2*np.pi - np.pi / 50, 100))
+#     tester.circ_buff=sine.copy()
+#     delayed_samples = tester.delayline_read(0.9, 61)
+#     plt.plot(delayed_samples)
+#     plt.plot(sine)
+#     plt.show()
         
 #     test_chunk = (np.random.rand(128) * np.iinfo(np.int16).max).astype('int16')
 #     test_start = time.time()
@@ -313,14 +389,14 @@ except KeyboardInterrupt:
     
     
 # def single_delay(self, insample):
-#     self.circular_buffer[self.write_idx] = insample
+#     self.circ_buff[self.write_idx] = insample
 #     self.write_idx += 1
-#     if self.write_idx >= len(self.circular_buffer):
+#     if self.write_idx >= len(self.circ_buff):
 #         self.write_idx = 0
 #         
-#     delayed_sample = self.circular_buffer[self.read_idx]
-#     self.read_idx += 1
-#     if self.read_idx >= len(self.circular_buffer):
-#         self.read_idx = 0
+#     delayed_sample = self.circ_buff[self.delay_read_idx]
+#     self.delay_read_idx += 1
+#     if self.delay_read_idx >= len(self.circ_buff):
+#         self.delay_read_idx = 0
 #         
 #     return insample + self.delay_gain * delayed_sample
