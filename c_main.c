@@ -56,8 +56,8 @@ static Sensor* sensor2;
 
 static void setup() {
 	Gain* gain = Gain_create(0.99f);
-	Distortion* dist = Distortion_create(0.0f);
-	Delay* del = Delay_create(0, 0.4f, SAMPLE_RATE * 4, CHUNK_SIZE);
+	Distortion* dist = Distortion_create(0.8f);
+	Delay* del = Delay_create(SAMPLE_RATE * 0, 0.6f, SAMPLE_RATE * 4, CHUNK_SIZE);
 	effects = Effects_create(gain, dist, del);
 
 	sensor1 = Sensor_create(23, 24, 35, 3);
@@ -81,13 +81,9 @@ static void exitHandler() {
 int main() {
 	// register teardown function to handle ctrl-c and such
 	atexit(exitHandler);
-	
 	setup();
-	
 	PaError err;
-	
 	PaStream *stream;
-	
 	err = Pa_OpenDefaultStream(&stream, IN_CHANNELS, OUT_CHANNELS,
 								 paFloat32, SAMPLE_RATE, CHUNK_SIZE,
 								 audioCallback, effects);

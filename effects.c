@@ -102,12 +102,7 @@ void Delay_destroy(Delay* del) {
 }
 
 void Delay_setTime(Delay* del, int _delaySamps) {
-	//~ del->delaySamps = _delaySamps;
 	del->newDelaySamps = _delaySamps;
-	//~ del->newReadPtr = del->writePtr - del->newDelaySamps;
-	//~ if (del->newReadPtr < del->buffer) {
-		//~ del->newReadPtr += del->buffSize;
-	//~ }
 	del->changingDelay = true;
 }
 
@@ -144,7 +139,6 @@ float Delay_apply(Delay* del, float sample) {
 		}
 		
 		del->crossfadeFactor += 1.0f / del->chunkSize;
-		//~ printf("crossfade factor: %f\n", del->crossfadeFactor);
 		// indicates we're done crossfading
 		if (del->crossfadeFactor >= 1) {
 			del->crossfadeFactor = 0;
