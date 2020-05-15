@@ -1,59 +1,63 @@
-// ultrasonic sensor settings
-#define TRIG (23)
-#define ECHO (24)
-#define NUM_READINGS (5)
-
 // contains data relevant to the ultrasonic sensors
 typedef struct {
+	int trigPin;
+	int echoPin;
 	float maxDist;
-	float readings[NUM_READINGS];
-	int readIndex;
+	int numReadings;
+
+	int timeoutMicros;
+	float* readings;
 	float total;
+	int readIndex;	
 	float average;
 	float lastAverage;
-	int timeoutMicros;
 }
-sensorData;
+Sensor;
 
-void sensorSetup(sensorData *sensor) {
-	sensor->maxDist = 31;
-	for (int i = 0; i < NUM_READINGS; i++) {
+Sensor* Sensor_create(int _trigPin, int _echoPin, float _maxDist, int _numReadings) {
+	Sensor* sensor = (Sensor*)malloc(sizeof(Sensor));
+	sensor->trigPin = _trigPin;
+	sensor->echoPin = _echoPin;
+	sensor->maxDist = _maxDist;
+	sensor->numReadings = _numReadings;
+
+	// converts cm to microseconds
+	sensor->timeoutMicros = sensor->maxDist * 58;
+	sensor->readings = (float*)malloc(sizeof(float) * sensor->numReadings);
+	for (int i = 0; i < sensor->numReadings; i++) {
 		sensor->readings[i] = sensor->maxDist;
 	}
+	sensor->total = sensor->maxDist * sensor->numReadings;
 	sensor->readIndex = 0;
-	sensor->total = sensor->maxDist * NUM_READINGS;
 	sensor->average = 0;
 	sensor->lastAverage = 0;
-	
-	// allows readings up to ~31cm
-	sensor->timeoutMicros = 2000;
-	
 
-	// makes sure pigpio doesn't hog the audio peripheral we need
-	gpioCfgClock(5, 0, 0);
-	
-	gpioInitialise();
-	gpioSetMode(TRIG, PI_OUTPUT);
-	gpioSetMode(ECHO, PI_INPUT);
+	gpioSetMode(sensor->trigPin, PI_OUTPUT);
+	gpioSetMode(sensor->echoPin, PI_INPUT);
 
-	gpioWrite(TRIG, PI_OFF);
-	gpioDelay(30000);
-	printf("finished setting up sensor stuff\n");
+	gpioWrite(sensor->trigPin, PI_OFF);
+
+	return sensor;
 }
 
-int getCM(uint32_t timeout) {
+void Sensor_destroy(Sensor* sensor) {
+	free(sensor->readings);
+	free(sensor);
+}
+
+int Sensor_getCM(Sensor* sensor) {
 	// Send trigger pulse
-	gpioWrite(TRIG, PI_ON);
+	gpioWrite(sensor->trigPin, PI_ON);
 	gpioDelay(20);
-	gpioWrite(TRIG, PI_OFF);
+	gpioWrite(sensor->trigPin, PI_OFF);
 
 	// Wait for echo start
-	while (gpioRead(ECHO) == PI_OFF);
+	while (gpioRead(sensor->echoPin) == PI_OFF);
 
 	// Wait for echo end
 	uint32_t startTime = gpioTick();
-	while (gpioRead(ECHO) == PI_ON) {
-		if (gpioTick() - startTime >= timeout) {
+	while (gpioRead(sensor->echoPin) == PI_ON) {
+		if (gpioTick() - startTime >= sensor->timeoutMicros) {
 			return -1;
 		}
 	}
@@ -63,17 +67,17 @@ int getCM(uint32_t timeout) {
 	return distance;
 }
 
-int getAvgValue(sensorData *sensor, float newDist) {
+int Sensor_getAvgValue(Sensor* sensor, float newDist) {
 	// subtract the last reading:
 	sensor->total -= sensor->readings[sensor->readIndex];
 	sensor->readings[sensor->readIndex] = newDist;
 	sensor->total += sensor->readings[sensor->readIndex];
 	sensor->readIndex++;
-	if (sensor->readIndex >= NUM_READINGS) {
+	if (sensor->readIndex >= sensor->numReadings) {
 		sensor->readIndex = 0;
 	}
 	// calculate the average:
-	sensor->average = sensor->total / NUM_READINGS;
+	sensor->average = sensor->total / sensor->numReadings;
 	sensor->lastAverage = sensor->average;
 	return sensor->average;
 }

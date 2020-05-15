@@ -15,13 +15,18 @@ float linearScale(float distance, float minDist, float maxDist, float paramMin, 
 	return value;
 }
 
+float logScale(float distance, float minDist, float maxDist, float paramMin, float paramMax) {
+	paramMin = log(paramMin);
+	paramMax = log(paramMax);
+	float scale = (paramMax - paramMin) / (maxDist - minDist);
+	return exp(paramMin + scale * (distance - minDist));
+}
+
 void queryDevices() {
-	PaError err;
 	int numDevices;
 	numDevices = Pa_GetDeviceCount();
 	if (numDevices < 0) {
 		printf("ERROR: Pa_CountDevices returned 0x%x\n", numDevices);
-		err = numDevices;
 	}
 
 	const PaDeviceInfo *deviceInfo;

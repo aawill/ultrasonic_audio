@@ -1,42 +1,29 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <signal.h>
-#include <pigpio.h>
 #include <stdbool.h>
+#include <pigpio.h>
 #include "portaudio.h"
 #include "pa_linux_alsa.h"
+#include "math.h"
 
 #include "utility.c"
 #include "sensor.c"
+#include "effects.c"
 
 #define SAMPLE_RATE (44100)
+#define ADJUSTED_SAMPLE_RATE (88200)
 #define IN_CHANNELS (1)
 #define OUT_CHANNELS (1)
-#define BUFFER_SIZE (128)
+#define CHUNK_SIZE (128)
 
-void sigintHandler(int sigNum) {
-	printf("\nsmashed that mf ctrl-C\n");
-	Pa_Terminate();
-	exit(0);
-}
-
-// contains data needed by the audio processing callback
-typedef struct {
-	float gain;
-	float distort_lvl;
-}
-audioData;
-
-// simple gain scaling function
-static void applyGain(float *sample, float gain) {
-	*sample *= gain;
-}
-
-// wave-shaping distortion
-static void distortion(float *sample, float amount) {
-	float k = 2 * amount / (1 - amount);
-	*sample = (1 + k) * *sample / (1 + k * abs(*sample));
-}
+#define GAIN_MIN (0)
+#define GAIN_MAX (1)
+#define DISTORT_MIN (0.01f)
+#define DISTORT_MAX (0.9f)
+#define DELAYSAMPS_MIN (0)
+#define DELAYSAMPS_MAX (SAMPLE_RATE * 0.7f)
+#define DELAYFDBK_MIN (0)
+#define DELAYFDBK_MAX (0.9f)
 
 // callback function that processes one block of audio samples at a time
 static int audioCallback(const void *inputBuffer,
@@ -44,17 +31,18 @@ static int audioCallback(const void *inputBuffer,
 						 unsigned long framesPerBuffer,
 						 const PaStreamCallbackTimeInfo* timeInfo,
 						 PaStreamCallbackFlags statusFlags,
-						 void *userData) {
-	// assign typed references to audio data, input/output buffers
-	audioData *data = (audioData*)userData;
+						 void *_fx) {
+	// assign typed references to effects data, input/output buffers
+	Effects* fx = (Effects*)_fx;
 	float *in = (float*)inputBuffer;
 	float *out = (float*)outputBuffer;
 
 	// loop through samples, do stuff to them
 	for (unsigned int i = 0; i < framesPerBuffer; ++i) {
 		*out = *in;
-		applyGain(out, data->gain);
-		distortion(out, data->distort_lvl);
+		*out = Gain_apply(fx->gain, *out);
+		*out = Distortion_apply(fx->distortion, *out);
+		*out = Delay_apply(fx->delay, *out);
 		// increment in and out pointers
 		in++;
 		out++;
@@ -62,49 +50,89 @@ static int audioCallback(const void *inputBuffer,
 	return 0;
 }
 
-static audioData aData;
-static sensorData sData;
+static Effects* effects;
+static Sensor* sensor1;
+static Sensor* sensor2;
 
-void audioSetup() {
-	aData.gain = 0.9f;
-	aData.distort_lvl = 0.0f;
+static void setup() {
+	Gain* gain = Gain_create(0.99f);
+	Distortion* dist = Distortion_create(0.0f);
+	Delay* del = Delay_create(0, 0.4f, SAMPLE_RATE * 4, CHUNK_SIZE);
+	effects = Effects_create(gain, dist, del);
+
+	sensor1 = Sensor_create(23, 24, 35, 3);
+	sensor2 = Sensor_create(17, 27, 50, 3);
 
 	Pa_Initialize();
+
+	// makes sure pigpio doesn't hog the audio peripheral we need
+	gpioCfgClock(5, 0, 0);
 	
-	printf("finisehd setting up audio stuff\n");
+	gpioInitialise();
+}
+
+static void exitHandler() {
+	Pa_Terminate();
+	Sensor_destroy(sensor1);
+	Sensor_destroy(sensor2);
+	Effects_destroy(effects);
 }
 
 int main() {
+	// register teardown function to handle ctrl-c and such
+	atexit(exitHandler);
 	
-	signal(SIGINT, sigintHandler);
-
-	audioSetup();
-	
-	sensorSetup(&sData);
-	PaStream *stream;
+	setup();
 	
 	PaError err;
-
+	
+	PaStream *stream;
+	
 	err = Pa_OpenDefaultStream(&stream, IN_CHANNELS, OUT_CHANNELS,
-														 paFloat32, SAMPLE_RATE, BUFFER_SIZE,
-														 audioCallback, &aData);
+								 paFloat32, SAMPLE_RATE, CHUNK_SIZE,
+								 audioCallback, effects);
 	PaAlsa_EnableRealtimeScheduling(stream, 1);
 	err = Pa_StartStream(stream);
 	if (err != paNoError) goto error;
 	
-	//~ Pa_Sleep(30 * 1000);
-	float lastSmoothedDist = 0;
+	float lastSmoothedDist1 = 0;
+	float lastSmoothedDist2 = 0;
 	while (1) {
-		float distance = getCM(sData.timeoutMicros);
-		if (distance != -1) {
-			float smoothedDist = getAvgValue(&sData, distance);
-			if (smoothedDist != lastSmoothedDist) {
-				//~ printf("%f \n", smoothedDist);
-				lastSmoothedDist = smoothedDist;
-				aData.distort_lvl = 1 - linearScale(smoothedDist, 0, sData.maxDist, 0.0f, 0.9f);
+		float distance1 = Sensor_getCM(sensor1);
+		float distance2 = Sensor_getCM(sensor2);
+		if (distance1 != -1) {
+			float smoothedDist1 = Sensor_getAvgValue(sensor1, distance1);
+			if (smoothedDist1 != lastSmoothedDist1) {
+				lastSmoothedDist1 = smoothedDist1;
+				float newDistort = DISTORT_MAX - linearScale(smoothedDist1,
+															 0, sensor1->maxDist,
+															 DISTORT_MIN, DISTORT_MAX);
+				Distortion_set(effects->distortion, newDistort);
 			}
 		}
-		time_sleep(0.05);
+		if (distance2 != -1) {
+			float smoothedDist2 = Sensor_getAvgValue(sensor2, distance2);
+			// lock out delay changes until current change is finished
+			if (smoothedDist2 != lastSmoothedDist2 && !effects->delay->changingDelay) {
+				lastSmoothedDist2 = smoothedDist2;
+				// if distance is near the end of its range, shut the delay off 
+				if (smoothedDist2 > sensor2->maxDist * 0.75) {
+					Delay_setTime(effects->delay, 0);
+					Delay_setFeedback(effects->delay, 0);
+				}
+				// otherwise, scale the distance to acquire new delay time and feedback values
+				else {
+					float newDelay = linearScale(smoothedDist2, 0, sensor2->maxDist,
+												 DELAYSAMPS_MIN, DELAYSAMPS_MAX);
+					float newFeedback = DELAYFDBK_MAX - linearScale(smoothedDist2,
+														0, sensor2->maxDist * 0.75,
+														DELAYFDBK_MIN, DELAYFDBK_MAX);
+					Delay_setTime(effects->delay, newDelay);
+					Delay_setFeedback(effects->delay, newFeedback);
+				}				
+			}
+		}
+		time_sleep(0.02);
 	}
 	
 	err = Pa_StopStream(stream);
