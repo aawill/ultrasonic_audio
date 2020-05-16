@@ -61,7 +61,7 @@ typedef struct {
 	float* buffer;
 	float* readPtr;
 	float* writePtr;
-	
+
 	int newDelaySamps;
 	bool changingDelay;
 	float crossfadeFactor;
@@ -74,7 +74,7 @@ Delay* Delay_create(int _delaySamps, float _feedback, int _sampleRate, int _chun
 	del->feedback = _feedback;
 	del->sampleRate = _sampleRate;
 	del->chunkSize = _chunkSize;
-	
+
 	del->buffSize = del->sampleRate * 4;
 	del->buffer = (float*)malloc(sizeof(float) * del->buffSize);
 	// initialize circular buffer with zeros
@@ -83,7 +83,7 @@ Delay* Delay_create(int _delaySamps, float _feedback, int _sampleRate, int _chun
 	}
 	// start write at the beginning
 	del->writePtr = del->buffer;
-	
+
 	del->newDelaySamps = del->delaySamps;
 	del->changingDelay = false;
 	del->crossfadeFactor = 0;
@@ -115,7 +115,7 @@ float Delay_apply(Delay* del, float sample) {
 	if (del->readPtr < del->buffer) {
 		del->readPtr += del->buffSize;
 	}
-	
+
 	if (del->changingDelay) {
 		// calculate new read pointer position, bounds check
 		float* newReadPtr = del->writePtr - del->newDelaySamps;
@@ -135,7 +135,7 @@ float Delay_apply(Delay* del, float sample) {
 			del->delaySamps = del->newDelaySamps;
 		}
 	}
-	else {	
+	else {
 		// add past data from delay line
 		sample += del->feedback * (*del->readPtr);
 	}
@@ -145,7 +145,7 @@ float Delay_apply(Delay* del, float sample) {
 	if (del->writePtr >= del->buffer + del->buffSize) {
 		del->writePtr -= del->buffSize;
 	}
-	
+
 	return sample;
 }
 
@@ -165,6 +165,9 @@ typedef struct {
 	float* readPtr;
 	float* writePtr;
 
+	float crossfadeFactor;
+	bool fading;
+	int newDelaySamps;
 }
 FracDelay;
 
@@ -179,7 +182,8 @@ FracDelay* FracDelay_create(float _delaySamps, int _sampleRate) {
 		del->buffer[i] = 0;
 	}
 	del->writePtr = del->buffer;
-
+	del->crossfadeFactor = 0;
+	del->fading = false;
 	return del;
 }
 
@@ -190,6 +194,7 @@ void FracDelay_destroy(FracDelay* del) {
 
 void FracDelay_setTime(FracDelay* del, float _delaySamps) {
 	del->delaySamps = _delaySamps;
+	//~ printf("setting delay to %f\n", _delaySamps);
 }
 
 float FracDelay_apply(FracDelay* del, float sample) {
@@ -216,7 +221,44 @@ float FracDelay_apply(FracDelay* del, float sample) {
 	if (y0 < del->buffer) {
 		y0 += del->buffSize;
 	}
-	sample = (*y0 - *y1) * fracDelay + *y1;
+
+	if (del->fading) {
+		// split delay time into integer and fractional parts
+		int intDelayNew = (int)floor(del->newDelaySamps);
+		float fracDelayNew = del->newDelaySamps - intDelayNew;
+		// calculate new read pointer position, bounds check
+		float* newReadPtr = del->writePtr - intDelayNew;
+		if (newReadPtr < del->buffer) {
+			newReadPtr += del->buffSize;
+		}
+
+		float* y0_new = newReadPtr - 1;
+		float* y1_new = newReadPtr;
+		if (y0_new < del->buffer) {
+			y0_new += del->buffSize;
+		}
+		
+		// need past data from two different points, crossfade between them
+		float oldData = sample = (*y0 - *y1) * fracDelay + *y1;
+		float newData = sample = (*y0_new - *y1_new) * fracDelayNew + *y1_new;
+		
+		sample = newData * del->crossfadeFactor + oldData * (1 - del->crossfadeFactor);
+		// should complete the crossfade in one chunk
+		del->crossfadeFactor += 1.0f / 128;
+		
+		// indicates we're done crossfading
+		if (del->crossfadeFactor >= 1) {
+			del->crossfadeFactor = 0;
+			del->fading = false;
+			del->delaySamps = del->newDelaySamps;
+		}
+	}
+	else {
+		// add past data from delay line
+		sample = (*y0 - *y1) * fracDelay + *y1;
+	}
+	
+	
 
 	return sample;
 }
@@ -238,9 +280,9 @@ PShift* PShift_create(float _semitones, float _sampleRate) {
 	pshift->semitones = _semitones;
 	pshift->sampleRate = _sampleRate;
 
-	float root = pow(2, pshift->semitones / 12);
-	pshift->shiftFactor = 0.1;
-	
+	//~ float root = pow(2, pshift->semitones / 12);
+	pshift->shiftFactor = 0.2;
+
 	// delay will modulate between 0-100 ms
 	pshift->maxDelaySamps = pshift->sampleRate / 10;
 
@@ -272,28 +314,33 @@ float PShift_apply(PShift* pshift, float sample) {
 	float newTime2 = pshift->delay2->delaySamps - pshift->shiftFactor;
 	// bounds checking creates the sawtooth shape
 	if (newTime1 <= 0) {
-		newTime1 += pshift->maxDelaySamps;
+		newTime1 = pshift->maxDelaySamps;
 	}
 	else if (newTime1 >= pshift->maxDelaySamps) {
-		newTime1 -= pshift->maxDelaySamps;
+		newTime1 = pshift->maxDelaySamps;
 	}
 	if (newTime2 <= 0) {
-		newTime2 += pshift->maxDelaySamps;
+		newTime2 = pshift->maxDelaySamps;
 	}
 	else if (newTime2 >= pshift->maxDelaySamps) {
-		newTime2 -= pshift->maxDelaySamps;
+		newTime2 = pshift->maxDelaySamps;
 	}
-	
+
 	FracDelay_setTime(pshift->delay1, newTime1);
 	FracDelay_setTime(pshift->delay2, newTime2);
 
 	// create cosine windows to mask discontinuities in delay ramping
-	float ramp1 = fabs(cos(5 * pshift->shiftFactor * 2*M_PI * (pshift->t) + M_PI_2));
+	float rampFreq = 5 * pshift->shiftFactor * 2*M_PI;
+	//~ printf("%f\n", rampFreq);
+	float ramp1 = fabs(cos(rampFreq * pshift->t + M_PI_2));
 	float ramp2 = 1 - ramp1;
 
 	// increment our time axis by 1/sampleRate, wrap at 1
-	pshift->t = fmod(pshift->t + (1.0 / pshift->sampleRate), 1);
+	pshift->t = fmod(pshift->t + (1.0 / pshift->sampleRate), 1.0f);
+	
 	// crossfade between windowed signals
+	//~ return sample1 * ramp1;
+	//~ return sample2 * ramp2;
 	return sample1 * ramp1 + sample2 * ramp2;
 }
 
