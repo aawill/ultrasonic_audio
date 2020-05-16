@@ -41,8 +41,8 @@ static int audioCallback(const void *inputBuffer,
 	for (unsigned int i = 0; i < framesPerBuffer; ++i) {
 		*out = *in;
 		*out = Gain_apply(fx->gain, *out);
-		*out = PShift_apply(fx->PShift, *out, timeInfo->currentTime);
-		//~ *out = Delay_apply(fx->delay, *out);
+		*out = PShift_apply(fx->pshift, *out);
+		*out = Delay_apply(fx->delay, *out);
 		*out = Distortion_apply(fx->distortion, *out);
 		
 		// increment in and out pointers
@@ -59,8 +59,8 @@ static Sensor* sensor2;
 static void setup() {
 	Gain* gain = Gain_create(GAIN_MAX);
 	Distortion* dist = Distortion_create(DISTORT_MIN);
-	Delay* del = Delay_create(0, 0.5f, SAMPLE_RATE * 4, CHUNK_SIZE);
-	PShift* pshift = PShift_create(-0.5f, SAMPLE_RATE);
+	Delay* del = Delay_create(0, 0.5f, SAMPLE_RATE, CHUNK_SIZE);
+	PShift* pshift = PShift_create(2, SAMPLE_RATE);
 	effects = Effects_create(gain, dist, del, pshift);
 
 	sensor1 = Sensor_create(23, 24, 35, 3);
@@ -107,6 +107,8 @@ int main() {
 															 0, sensor1->maxDist,
 															 DISTORT_MIN, DISTORT_MAX);
 				Distortion_set(effects->distortion, newDistort);
+				//~ float newPitchShift = linearScale(smoothedDist1, 0, sensor1->maxDist, -0.5f, 0.5f);
+				//~ PShift_set(effects->pshift, newPitchShift);
 			}
 		}
 		if (distance2 != -1) {
@@ -115,20 +117,20 @@ int main() {
 			if (smoothedDist2 != lastSmoothedDist2 && !effects->delay->changingDelay) {
 				lastSmoothedDist2 = smoothedDist2;
 				// if distance is near the end of its range, shut the delay off 
-				//~ if (smoothedDist2 > sensor2->maxDist * 0.75) {
-					//~ Delay_setTime(effects->delay, 0);
-					//~ Delay_setFeedback(effects->delay, 0);
-				//~ }
-				//~ // otherwise, scale the distance to acquire new delay time and feedback values
-				//~ else {
-					//~ float newDelay = linearScale(smoothedDist2, 0, sensor2->maxDist,
-												 //~ DELAYSAMPS_MIN, DELAYSAMPS_MAX);
-					//~ float newFeedback = DELAYFDBK_MAX - linearScale(smoothedDist2,
-														//~ 0, sensor2->maxDist * 0.75,
-														//~ DELAYFDBK_MIN, DELAYFDBK_MAX);
-					//~ Delay_setTime(effects->delay, newDelay);
-					//~ Delay_setFeedback(effects->delay, newFeedback);
-				//~ }				
+				if (smoothedDist2 > sensor2->maxDist * 0.75) {
+					Delay_setTime(effects->delay, 0);
+					Delay_setFeedback(effects->delay, 0);
+				}
+				// otherwise, scale the distance to acquire new delay time and feedback values
+				else {
+					float newDelay = linearScale(smoothedDist2, 0, sensor2->maxDist,
+												 DELAYSAMPS_MIN, DELAYSAMPS_MAX);
+					float newFeedback = DELAYFDBK_MAX - linearScale(smoothedDist2,
+														0, sensor2->maxDist * 0.75,
+														DELAYFDBK_MIN, DELAYFDBK_MAX);
+					Delay_setTime(effects->delay, newDelay);
+					Delay_setFeedback(effects->delay, newFeedback);
+				}				
 			}
 		}
 		
