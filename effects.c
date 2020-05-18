@@ -1,16 +1,14 @@
 typedef struct {
 	float gain;
+	bool active;
 }
 Gain;
 
 Gain* Gain_create(float _gain) {
 	Gain* g = (Gain*)malloc(sizeof(Gain));
 	g->gain = _gain;
+	g->active = true;
 	return g;
-}
-
-void Gain_destroy(Gain* g) {
-	free(g);
 }
 
 void Gain_set(Gain* g, float newGain) {
@@ -24,19 +22,22 @@ float Gain_apply(Gain* g, float sample) {
 	return sample * g->gain;
 }
 
+void Gain_destroy(Gain* g) {
+	free(g);
+}
+
 typedef struct {
 	float amount;
+	
+	bool active;
 }
 Distortion;
 
 Distortion* Distortion_create(float _amount) {
 	Distortion* dist = (Distortion*)malloc(sizeof(Distortion));
 	dist->amount = _amount;
+	dist->active = true;
 	return dist;
-}
-
-void Distortion_destroy(Distortion* dist) {
-	free(dist);
 }
 
 void Distortion_set(Distortion* dist, float newAmount) {
@@ -49,6 +50,10 @@ float Distortion_get(Distortion* dist) {
 float Distortion_apply(Distortion* d, float sample) {
 	float k = 2 * d->amount / (1 - d->amount);
 	return (1 + k) * sample / (1 + k * abs(sample));
+}
+
+void Distortion_destroy(Distortion* dist) {
+	free(dist);
 }
 
 typedef struct {
@@ -65,6 +70,8 @@ typedef struct {
 	int newDelaySamps;
 	bool changingDelay;
 	float crossfadeFactor;
+
+	bool active;
 }
 Delay;
 
@@ -87,13 +94,9 @@ Delay* Delay_create(int _delaySamps, float _feedback, int _sampleRate, int _chun
 	del->newDelaySamps = del->delaySamps;
 	del->changingDelay = false;
 	del->crossfadeFactor = 0;
+	del->active = true;
 
 	return del;
-}
-
-void Delay_destroy(Delay* del) {
-	free(del->buffer);
-	free(del);
 }
 
 void Delay_setTime(Delay* del, int _delaySamps) {
@@ -115,7 +118,7 @@ float Delay_apply(Delay* del, float sample) {
 	if (del->readPtr < del->buffer) {
 		del->readPtr += del->buffSize;
 	}
-
+	// if we need to crossfade between old and new delay times
 	if (del->changingDelay) {
 		// calculate new read pointer position, bounds check
 		float* newReadPtr = del->writePtr - del->newDelaySamps;
@@ -149,6 +152,11 @@ float Delay_apply(Delay* del, float sample) {
 	return sample;
 }
 
+void Delay_destroy(Delay* del) {
+	free(del->buffer);
+	free(del);
+}
+
 /*
  * EFFECT: FRACTIONAL DELAY
  * Operates on the same principles as the regular delay.
@@ -168,6 +176,8 @@ typedef struct {
 	float crossfadeFactor;
 	bool fading;
 	int newDelaySamps;
+
+	bool active;
 }
 FracDelay;
 
@@ -184,17 +194,12 @@ FracDelay* FracDelay_create(float _delaySamps, int _sampleRate) {
 	del->writePtr = del->buffer;
 	del->crossfadeFactor = 0;
 	del->fading = false;
+	del->active = true;
 	return del;
-}
-
-void FracDelay_destroy(FracDelay* del) {
-	free(del->buffer);
-	free(del);
 }
 
 void FracDelay_setTime(FracDelay* del, float _delaySamps) {
 	del->delaySamps = _delaySamps;
-	//~ printf("setting delay to %f\n", _delaySamps);
 }
 
 float FracDelay_apply(FracDelay* del, float sample) {
@@ -222,45 +227,15 @@ float FracDelay_apply(FracDelay* del, float sample) {
 		y0 += del->buffSize;
 	}
 
-	if (del->fading) {
-		// split delay time into integer and fractional parts
-		int intDelayNew = (int)floor(del->newDelaySamps);
-		float fracDelayNew = del->newDelaySamps - intDelayNew;
-		// calculate new read pointer position, bounds check
-		float* newReadPtr = del->writePtr - intDelayNew;
-		if (newReadPtr < del->buffer) {
-			newReadPtr += del->buffSize;
-		}
-
-		float* y0_new = newReadPtr - 1;
-		float* y1_new = newReadPtr;
-		if (y0_new < del->buffer) {
-			y0_new += del->buffSize;
-		}
-		
-		// need past data from two different points, crossfade between them
-		float oldData = sample = (*y0 - *y1) * fracDelay + *y1;
-		float newData = sample = (*y0_new - *y1_new) * fracDelayNew + *y1_new;
-		
-		sample = newData * del->crossfadeFactor + oldData * (1 - del->crossfadeFactor);
-		// should complete the crossfade in one chunk
-		del->crossfadeFactor += 1.0f / 128;
-		
-		// indicates we're done crossfading
-		if (del->crossfadeFactor >= 1) {
-			del->crossfadeFactor = 0;
-			del->fading = false;
-			del->delaySamps = del->newDelaySamps;
-		}
-	}
-	else {
-		// add past data from delay line
-		sample = (*y0 - *y1) * fracDelay + *y1;
-	}
+	// add past data from delay line
+	sample = (*y0 - *y1) * fracDelay + *y1;
 	
-	
-
 	return sample;
+}
+
+void FracDelay_destroy(FracDelay* del) {
+	free(del->buffer);
+	free(del);
 }
 
 typedef struct {
@@ -268,10 +243,20 @@ typedef struct {
 	int sampleRate;
 
 	float shiftFactor;
-	float maxDelaySamps;
+	float maxDelay;
 	FracDelay* delay1;
 	FracDelay* delay2;
-	float t;
+	
+	float fade1;
+	bool fadingDown1;
+	bool fadingUp1;
+	float fade2;
+	bool fadingDown2;
+	bool fadingUp2;
+	float tolerance;
+	float fadeOffset;
+
+	bool active;
 }
 PShift;
 
@@ -279,20 +264,93 @@ PShift* PShift_create(float _semitones, float _sampleRate) {
 	PShift* pshift = (PShift*)malloc(sizeof(PShift));
 	pshift->semitones = _semitones;
 	pshift->sampleRate = _sampleRate;
-
-	//~ float root = pow(2, pshift->semitones / 12);
-	pshift->shiftFactor = 0.2;
-
+	
+	// controls the speed of the sawtooth delay time ramp, and therefore output pitch
+	pshift->shiftFactor = pow(2, pshift->semitones / 12) - 1;
 	// delay will modulate between 0-100 ms
-	pshift->maxDelaySamps = pshift->sampleRate / 10;
-
+	pshift->maxDelay = pshift->sampleRate / 10;
 	// create two delay lines, 180 degrees out of phase with each other
 	pshift->delay1 = FracDelay_create(0, pshift->sampleRate);
 	// (second delay line starts halfway up the ramp)
-	pshift->delay2 = FracDelay_create(pshift->maxDelaySamps / 2, pshift->sampleRate);
-
-	pshift->t = 0;
+	pshift->delay2 = FracDelay_create(pshift->maxDelay / 2, pshift->sampleRate);
+	// variables to handle crossfading between delay lines
+	pshift->fade1 = 0;
+	pshift->fadingDown1 = false;
+	pshift->fadingUp1 = false;
+	pshift->fade2 = 0;
+	pshift->fadingDown2 = false;
+	pshift->fadingUp2 = false;
+	// help detect when to start crossfading
+	pshift->tolerance = fabs(pshift->shiftFactor / 2);
+	pshift->fadeOffset = pshift->shiftFactor * 1000;
+	pshift->active = true;
 	return pshift;
+}
+
+void PShift_set(PShift* pshift, float _shiftFactor) {
+	pshift->shiftFactor = _shiftFactor;
+}
+
+float PShift_apply(PShift* pshift, float sample) {
+	if (pshift->semitones == 0) {
+		return sample;
+	}
+	// apply current delays
+	float sample1 = FracDelay_apply(pshift->delay1, sample);
+	float sample2 = FracDelay_apply(pshift->delay2, sample);
+	// calculate new delay times
+	float newTime1 = pshift->delay1->delaySamps - pshift->shiftFactor;
+	float newTime2 = pshift->delay2->delaySamps - pshift->shiftFactor;
+	// need to wrap around 0 and maxDelay to create sawtooth shape
+	// (add maxDelay so negative delays wrap right)
+	newTime1 = fmod(newTime1 + pshift->maxDelay, pshift->maxDelay);
+	newTime2 = fmod(newTime2 + pshift->maxDelay, pshift->maxDelay);
+	// determine when to start fading down+up to avoid discontinuity
+	float fadeSample = fmod(pshift->maxDelay + pshift->fadeOffset, pshift->maxDelay);
+	// probably won't hit fadeSample exactly, so detect when we're close enough
+	if (fabs(newTime1 - fadeSample) < pshift->tolerance) {
+		pshift->fadingDown1 = true;
+		pshift->fadingUp2 = true;
+	}
+	if (fabs(newTime2 - fadeSample) < pshift->tolerance) {
+		pshift->fadingDown2 = true;
+		pshift->fadingUp1 = true;
+	}
+	// set new delay times
+	FracDelay_setTime(pshift->delay1, newTime1);
+	FracDelay_setTime(pshift->delay2, newTime2);
+	// apply crossfading between delay lines if necessary
+	if (pshift->fadingDown1) {
+		pshift->fade1 -= 0.001;
+		if (pshift->fade1 <= 0) {
+			pshift->fade1 = 0;
+			pshift->fadingDown1 = false;
+		}
+	}
+	else if (pshift->fadingUp1) {
+		pshift->fade1 += 0.001;
+		if (pshift->fade1 >= 1) {
+			pshift->fade1 = 1;
+			pshift->fadingUp1 = false;
+		}
+	}
+	if (pshift->fadingDown2) {
+		pshift->fade2 -= 0.001;
+		if (pshift->fade2 <= 0) {
+			pshift->fade2 = 0;
+			pshift->fadingDown2 = false;
+		}
+	}
+	else if (pshift->fadingUp2) {
+		pshift->fade2 += 0.001;
+		if (pshift->fade2 >= 1) {
+			pshift->fade2 = 1;
+			pshift->fadingUp2 = false;
+		}
+	}
+	sample1 *= pshift->fade1;
+	sample2 *= pshift->fade2;
+	return sample1 + sample2;
 }
 
 void PShift_destroy(PShift* pshift) {
@@ -301,65 +359,121 @@ void PShift_destroy(PShift* pshift) {
 	free(pshift);
 }
 
-void PShift_set(PShift* pshift, float _shiftFactor) {
-	pshift->shiftFactor = _shiftFactor;
-}
-
-float PShift_apply(PShift* pshift, float sample) {
-	// apply delay, then modulate the delay time
-	float sample1 = FracDelay_apply(pshift->delay1, sample);
-	float sample2 = FracDelay_apply(pshift->delay2, sample);
-	// subtract so that positive shift amounts create upward shift - delay ramps down
-	float newTime1 = pshift->delay1->delaySamps - pshift->shiftFactor;
-	float newTime2 = pshift->delay2->delaySamps - pshift->shiftFactor;
-	// bounds checking creates the sawtooth shape
-	if (newTime1 <= 0) {
-		newTime1 = pshift->maxDelaySamps;
-	}
-	else if (newTime1 >= pshift->maxDelaySamps) {
-		newTime1 = pshift->maxDelaySamps;
-	}
-	if (newTime2 <= 0) {
-		newTime2 = pshift->maxDelaySamps;
-	}
-	else if (newTime2 >= pshift->maxDelaySamps) {
-		newTime2 = pshift->maxDelaySamps;
-	}
-
-	FracDelay_setTime(pshift->delay1, newTime1);
-	FracDelay_setTime(pshift->delay2, newTime2);
-
-	// create cosine windows to mask discontinuities in delay ramping
-	float rampFreq = 5 * pshift->shiftFactor * 2*M_PI;
-	//~ printf("%f\n", rampFreq);
-	float ramp1 = fabs(cos(rampFreq * pshift->t + M_PI_2));
-	float ramp2 = 1 - ramp1;
-
-	// increment our time axis by 1/sampleRate, wrap at 1
-	pshift->t = fmod(pshift->t + (1.0 / pshift->sampleRate), 1.0f);
+typedef struct {
+	int numVoices;
+	int* shiftAmounts;
+	float* mixAmounts;
+	int sampleRate;
 	
-	// crossfade between windowed signals
-	//~ return sample1 * ramp1;
-	//~ return sample2 * ramp2;
-	return sample1 * ramp1 + sample2 * ramp2;
+	PShift** voices;
+	bool* activeVoices;
+
+	bool active;
+}
+Harmonizer;
+
+Harmonizer* Harmonizer_create(int _numVoices, int* _shiftAmounts, float* _mixAmounts, int _sampleRate) {
+	Harmonizer* harm = (Harmonizer*)malloc(sizeof(Harmonizer));
+	harm->numVoices = _numVoices;
+	harm->shiftAmounts = (int*)malloc(sizeof(int) * harm->numVoices);
+	harm->mixAmounts = (float*)malloc(sizeof(float) * harm->numVoices);
+	harm->voices = (PShift**)malloc(sizeof(PShift*) * harm->numVoices);
+	harm->activeVoices = (bool*)malloc(sizeof(bool) * harm->numVoices);
+	harm->sampleRate = _sampleRate;
+	for (unsigned int i = 0; i < harm->numVoices; ++i) {
+		harm->shiftAmounts[i] = _shiftAmounts[i];
+		harm->mixAmounts[i] = _mixAmounts[i];
+		harm->voices[i] = PShift_create(harm->shiftAmounts[i], harm->sampleRate);
+		harm->activeVoices[i] = true;
+	}
+	harm->active = true;
+	return harm;
 }
 
+void Harmonizer_addVoice(Harmonizer* harm, int shift, float mix) {
+	// grow and update internal arrays
+	harm->shiftAmounts = (int*)realloc(harm->shiftAmounts, sizeof(int) * ++harm->numVoices);
+	harm->mixAmounts = (float*)realloc(harm->mixAmounts, sizeof(float) * harm->numVoices);
+	harm->voices = (PShift**)realloc(harm->voices, sizeof(PShift*) * harm->numVoices);
+	harm->activeVoices = (bool*)realloc(harm->activeVoices, sizeof(bool) * harm->numVoices);
+	harm->shiftAmounts[harm->numVoices - 1] = shift;
+	harm->mixAmounts[harm->numVoices - 1] = mix;
+	harm->voices[harm->numVoices - 1] = PShift_create(shift, harm->sampleRate);
+	harm->activeVoices[harm->numVoices - 1] = true;
+}
 
+void Harmonizer_enableVoice(Harmonizer* harm, int voice) {
+	//~ printf("enabling %d\n", voice);
+	//~ float mixAmnt = harm->mixAmounts[voice];
+	//~ harm->mixAmounts[voice] = 0;
+	//~ printf("ramping up\n");
+	harm->activeVoices[voice] = true;
+	//~ while (harm->mixAmounts[voice] < mixAmnt) {
+		//~ harm->mixAmounts[voice] += 0.001;
+		//~ time_sleep(0.0001);
+	//~ }
+	
+	//~ printf("done ramping up\n");
+}
+
+void Harmonizer_disableVoice(Harmonizer* harm, int voice) {
+	//~ float mixAmnt = harm->mixAmounts[voice];
+	//~ while (harm->mixAmounts[voice] > 0) {
+		//~ harm->mixAmounts[voice] -= 0.001;
+		//~ time_sleep(0.0001);
+	//~ }
+	harm->activeVoices[voice] = false;
+	//~ harm->mixAmounts[voice] = mixAmnt;
+}
+
+void Harmonizer_setActiveVoices(Harmonizer* harm, int* activeVoices, int numActive) {
+	for (unsigned int i = 0; i < harm->numVoices; ++i) {
+		if (intInArray(activeVoices, numActive, i)) {
+			Harmonizer_enableVoice(harm, i);
+		}
+		else {
+			Harmonizer_disableVoice(harm, i);
+		}
+	}
+}
+
+float Harmonizer_apply(Harmonizer* harm, float sample) {
+	float harmSamp = sample;
+	for (unsigned int i = 0; i < harm->numVoices; ++i) {
+		if (harm->activeVoices[i]) {
+			//~ if (i == 0) {
+				//~ printf("mix amnt: %f\n", harm->mixAmounts[i]);
+			//~ }
+			harmSamp += PShift_apply(harm->voices[i], sample) * harm->mixAmounts[i];
+		}
+	}
+	return harmSamp;
+}
+
+void Harmonizer_destroy(Harmonizer* harm) {
+	free(harm->shiftAmounts);
+	free(harm->mixAmounts);
+	for (unsigned int i = 0; i < harm->numVoices; ++i) {
+		PShift_destroy(harm->voices[i]);
+	}
+	free(harm->voices);
+	free(harm);
+}
 
 typedef struct {
 	Gain* gain;
 	Distortion* distortion;
 	Delay* delay;
-	PShift* pshift;
+	Harmonizer* harmonizer;
 }
 Effects;
 
-Effects* Effects_create(Gain* _gain, Distortion* _distortion, Delay* _delay, PShift* _pshift) {
+Effects* Effects_create(Gain* _gain, Distortion* _distortion, Delay* _delay, Harmonizer* _harmonizer) {
 	Effects* fx = (Effects*)malloc(sizeof(Effects));
 	fx->gain = _gain;
 	fx->distortion = _distortion;
 	fx->delay = _delay;
-	fx->pshift = _pshift;
+	fx->harmonizer = _harmonizer;
 	return fx;
 }
 
@@ -367,6 +481,6 @@ void Effects_destroy(Effects* fx) {
 	Gain_destroy(fx->gain);
 	Distortion_destroy(fx->distortion);
 	Delay_destroy(fx->delay);
-	PShift_destroy(fx->pshift);
+	Harmonizer_destroy(fx->harmonizer);
 }
 

@@ -35,3 +35,34 @@ void queryDevices() {
 		printf("audio device: %s \n", deviceInfo->name);
 	}
 }
+
+bool intInArray(int* arr, int size, int val) {
+	for (unsigned int i = 0; i < size; ++i) {
+		if (arr[i] == val) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool floatInArray(float* arr, int size, float val) {
+	for (unsigned int i = 0; i < size; ++i) {
+		if (arr[i] == val) {
+			return true;
+		}
+	}
+	return false;
+}
+
+int subRange(float distance, float minDist, float maxDist, int numSubranges) {
+	if (distance < minDist || distance > maxDist) {
+		return -1;
+	}
+	//~ int subRangeSize = (maxDist - minDist) / numSubranges;
+	for (unsigned int i = 0; i < numSubranges; ++i) {
+		if (distance < maxDist * (i+1) / numSubranges) {
+			return i;
+		}
+	}
+	return -1;
+}

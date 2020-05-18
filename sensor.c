@@ -2,6 +2,7 @@
 typedef struct {
 	int trigPin;
 	int echoPin;
+	float minDist;
 	float maxDist;
 	int numReadings;
 
@@ -14,10 +15,11 @@ typedef struct {
 }
 Sensor;
 
-Sensor* Sensor_create(int _trigPin, int _echoPin, float _maxDist, int _numReadings) {
+Sensor* Sensor_create(int _trigPin, int _echoPin, float _minDist, float _maxDist, int _numReadings) {
 	Sensor* sensor = (Sensor*)malloc(sizeof(Sensor));
 	sensor->trigPin = _trigPin;
 	sensor->echoPin = _echoPin;
+	sensor->minDist = _minDist;
 	sensor->maxDist = _maxDist;
 	sensor->numReadings = _numReadings;
 
@@ -64,7 +66,7 @@ int Sensor_getCM(Sensor* sensor) {
 	uint32_t travelTime = gpioTick() - startTime;
 	// Get distance in cm
 	int distance = travelTime / 58;
-	return distance;
+	return distance > sensor->minDist ? distance : -1;
 }
 
 int Sensor_getAvgValue(Sensor* sensor, float newDist) {

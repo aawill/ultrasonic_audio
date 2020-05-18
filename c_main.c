@@ -40,11 +40,18 @@ static int audioCallback(const void *inputBuffer,
 	// loop through samples, do stuff to them
 	for (unsigned int i = 0; i < framesPerBuffer; ++i) {
 		*out = *in;
-		*out = Gain_apply(fx->gain, *out);
-		*out = PShift_apply(fx->pshift, *out);
-		*out = Delay_apply(fx->delay, *out);
-		*out = Distortion_apply(fx->distortion, *out);
-		
+		if (fx->gain->active) {
+			*out = Gain_apply(fx->gain, *out);
+		}
+		if (fx->delay->active) {
+			*out = Delay_apply(fx->delay, *out);
+		}
+		if (fx->harmonizer->active) {
+			*out = Harmonizer_apply(fx->harmonizer, *out);
+		}
+		if (fx->distortion->active) {
+			*out = Distortion_apply(fx->distortion, *out);
+		}
 		// increment in and out pointers
 		in++;
 		out++;
@@ -60,11 +67,22 @@ static void setup() {
 	Gain* gain = Gain_create(GAIN_MAX);
 	Distortion* dist = Distortion_create(DISTORT_MIN);
 	Delay* del = Delay_create(0, 0.5f, SAMPLE_RATE, CHUNK_SIZE);
-	PShift* pshift = PShift_create(2, SAMPLE_RATE);
-	effects = Effects_create(gain, dist, del, pshift);
+	//~ int shiftAmounts[10] = {-12, -7, 4, 7, 9, 14, 16, 19, 24};
+	//~ float mixAmounts[10] = {0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8};
+	//~ Harmonizer* harm = Harmonizer_create(10, shiftAmounts, mixAmounts, SAMPLE_RATE);
+	//~ for (unsigned int i = 0; i < 10; ++i) {
+		//~ Harmonizer_disableVoice(harm, i);
+	//~ }
+	int shiftAmounts[4] = {12, 7, 4, 9};
+	float mixAmounts[4] = {0.9, 0.9, 0.9, 0.9};
+	Harmonizer* harm = Harmonizer_create(4, shiftAmounts, mixAmounts, SAMPLE_RATE);
+	for (unsigned int i = 0; i < 4; ++i) {
+		Harmonizer_disableVoice(harm, i);
+	}
+	effects = Effects_create(gain, dist, del, harm);
 
-	sensor1 = Sensor_create(23, 24, 35, 3);
-	sensor2 = Sensor_create(17, 27, 50, 3);
+	sensor1 = Sensor_create(23, 24, 10, 60, 3);
+	sensor2 = Sensor_create(17, 27, 5, 50, 3);
 
 	Pa_Initialize();
 
@@ -93,25 +111,52 @@ int main() {
 	PaAlsa_EnableRealtimeScheduling(stream, 1);
 	err = Pa_StartStream(stream);
 	if (err != paNoError) goto error;
-	
 	float lastSmoothedDist1 = 0;
 	float lastSmoothedDist2 = 0;
+	int lastSubrange = -1;
 	while (1) {
 		float distance1 = Sensor_getCM(sensor1);
 		float distance2 = Sensor_getCM(sensor2);
-		if (distance1 != -1) {
+		if (distance1 != -1 && distance1 >= sensor1->minDist) {
 			float smoothedDist1 = Sensor_getAvgValue(sensor1, distance1);
 			if (smoothedDist1 != lastSmoothedDist1) {
 				lastSmoothedDist1 = smoothedDist1;
-				float newDistort = DISTORT_MAX - linearScale(smoothedDist1,
-															 0, sensor1->maxDist,
-															 DISTORT_MIN, DISTORT_MAX);
-				Distortion_set(effects->distortion, newDistort);
-				//~ float newPitchShift = linearScale(smoothedDist1, 0, sensor1->maxDist, -0.5f, 0.5f);
-				//~ PShift_set(effects->pshift, newPitchShift);
+				//~ printf("%f\n", smoothedDist1);
+				//~ float newDistort = DISTORT_MAX - linearScale(smoothedDist1,
+															 //~ sensor1->minDist, sensor1->maxDist,
+															 //~ DISTORT_MIN, DISTORT_MAX);
+				//~ Distortion_set(effects->distortion, newDistort);
+				if (smoothedDist1 >= sensor1->maxDist * 0.75) {
+					//~ printf("shutting off\n");
+					effects->harmonizer->active = false;
+				}
+				else {
+					effects->harmonizer->active = true;
+					int currentSubrange = subRange(smoothedDist1, sensor1->minDist, sensor1->maxDist * 0.75, 5);
+					if (currentSubrange != -1 && currentSubrange != lastSubrange) {
+						lastSubrange = currentSubrange;
+						//~ printf("%d\n", currentSubrange);
+						if (currentSubrange == 4) {
+							int voices[1] = {0};
+							Harmonizer_setActiveVoices(effects->harmonizer, voices, 1);
+						}
+						else if (currentSubrange == 3) {
+							int voices[2] = {0, 1};
+							Harmonizer_setActiveVoices(effects->harmonizer, voices, 2);
+						}
+						else if (currentSubrange == 2) {
+							int voices[3] = {0, 1, 2};
+							Harmonizer_setActiveVoices(effects->harmonizer, voices, 3);
+						}
+						else if (currentSubrange == 1) {
+							int voices[4] = {0, 1, 2, 3};
+							Harmonizer_setActiveVoices(effects->harmonizer, voices, 4);
+						}
+					}
+				}
 			}
 		}
-		if (distance2 != -1) {
+		if (distance2 != -1 && distance2 >= sensor2->minDist) {
 			float smoothedDist2 = Sensor_getAvgValue(sensor2, distance2);
 			// lock out delay changes until current change is finished
 			if (smoothedDist2 != lastSmoothedDist2 && !effects->delay->changingDelay) {
@@ -123,10 +168,10 @@ int main() {
 				}
 				// otherwise, scale the distance to acquire new delay time and feedback values
 				else {
-					float newDelay = linearScale(smoothedDist2, 0, sensor2->maxDist,
+					float newDelay = linearScale(smoothedDist2, sensor2->minDist, sensor2->maxDist,
 												 DELAYSAMPS_MIN, DELAYSAMPS_MAX);
 					float newFeedback = DELAYFDBK_MAX - linearScale(smoothedDist2,
-														0, sensor2->maxDist * 0.75,
+														sensor2->minDist, sensor2->maxDist * 0.75,
 														DELAYFDBK_MIN, DELAYFDBK_MAX);
 					Delay_setTime(effects->delay, newDelay);
 					Delay_setFeedback(effects->delay, newFeedback);
@@ -134,7 +179,7 @@ int main() {
 			}
 		}
 		
-		time_sleep(0.02);
+		time_sleep(0.01);
 	}
 	
 	err = Pa_StopStream(stream);
