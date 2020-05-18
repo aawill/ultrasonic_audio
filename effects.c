@@ -256,6 +256,10 @@ typedef struct {
 	float tolerance;
 	float fadeOffset;
 
+	bool globalFadeUp;
+	bool globalFadeDown;
+	float effectGain;
+	float newEffectGain;
 	bool active;
 }
 PShift;
@@ -283,8 +287,28 @@ PShift* PShift_create(float _semitones, float _sampleRate) {
 	// help detect when to start crossfading
 	pshift->tolerance = fabs(pshift->shiftFactor / 2);
 	pshift->fadeOffset = pshift->shiftFactor * 1000;
+
+	// vars to handle ramping an entire PShift voice's gain 
+	pshift->globalFadeUp = false;
+	pshift->globalFadeDown = false;
+	pshift->effectGain = 1;
+	pshift->newEffectGain = 1;
 	pshift->active = true;
 	return pshift;
+}
+
+void PShift_setGain(PShift* pshift, float newGain) {
+	// reject gain changes while we're already ramping 
+	if (pshift->globalFadeDown || pshift->globalFadeUp) {
+		return;
+	}
+	if (newGain < pshift->effectGain) {
+		pshift->globalFadeDown = true;
+	}
+	else if (newGain > pshift->effectGain) {
+		pshift->globalFadeUp = true;
+	}
+	pshift->newEffectGain = newGain;
 }
 
 void PShift_set(PShift* pshift, float _shiftFactor) {
@@ -350,7 +374,24 @@ float PShift_apply(PShift* pshift, float sample) {
 	}
 	sample1 *= pshift->fade1;
 	sample2 *= pshift->fade2;
-	return sample1 + sample2;
+	float output = (sample1 + sample2) * pshift->effectGain;
+
+	// apply any fading up or down of the effect gain that may be occurring
+	if (pshift->globalFadeDown) {
+		pshift->effectGain -= 0.001;
+		if (pshift->effectGain <= pshift->newEffectGain) {
+			pshift->effectGain = pshift->newEffectGain;
+			pshift->globalFadeDown = false;
+		}
+	}
+	else if (pshift->globalFadeUp) {
+		pshift->effectGain += 0.001;
+		if (pshift->effectGain >= pshift->newEffectGain) {
+			pshift->effectGain = pshift->newEffectGain;
+			pshift->globalFadeUp = false;
+		}
+	} 
+	return output;
 }
 
 void PShift_destroy(PShift* pshift) {
@@ -365,7 +406,7 @@ typedef struct {
 	float* mixAmounts;
 	int sampleRate;
 	
-	PShift** voices;
+	PShift** shifters;
 	bool* activeVoices;
 
 	bool active;
@@ -377,13 +418,13 @@ Harmonizer* Harmonizer_create(int _numVoices, int* _shiftAmounts, float* _mixAmo
 	harm->numVoices = _numVoices;
 	harm->shiftAmounts = (int*)malloc(sizeof(int) * harm->numVoices);
 	harm->mixAmounts = (float*)malloc(sizeof(float) * harm->numVoices);
-	harm->voices = (PShift**)malloc(sizeof(PShift*) * harm->numVoices);
+	harm->shifters = (PShift**)malloc(sizeof(PShift*) * harm->numVoices);
 	harm->activeVoices = (bool*)malloc(sizeof(bool) * harm->numVoices);
 	harm->sampleRate = _sampleRate;
 	for (unsigned int i = 0; i < harm->numVoices; ++i) {
 		harm->shiftAmounts[i] = _shiftAmounts[i];
 		harm->mixAmounts[i] = _mixAmounts[i];
-		harm->voices[i] = PShift_create(harm->shiftAmounts[i], harm->sampleRate);
+		harm->shifters[i] = PShift_create(harm->shiftAmounts[i], harm->sampleRate);
 		harm->activeVoices[i] = true;
 	}
 	harm->active = true;
@@ -394,57 +435,46 @@ void Harmonizer_addVoice(Harmonizer* harm, int shift, float mix) {
 	// grow and update internal arrays
 	harm->shiftAmounts = (int*)realloc(harm->shiftAmounts, sizeof(int) * ++harm->numVoices);
 	harm->mixAmounts = (float*)realloc(harm->mixAmounts, sizeof(float) * harm->numVoices);
-	harm->voices = (PShift**)realloc(harm->voices, sizeof(PShift*) * harm->numVoices);
+	harm->shifters = (PShift**)realloc(harm->shifters, sizeof(PShift*) * harm->numVoices);
 	harm->activeVoices = (bool*)realloc(harm->activeVoices, sizeof(bool) * harm->numVoices);
 	harm->shiftAmounts[harm->numVoices - 1] = shift;
 	harm->mixAmounts[harm->numVoices - 1] = mix;
-	harm->voices[harm->numVoices - 1] = PShift_create(shift, harm->sampleRate);
+	harm->shifters[harm->numVoices - 1] = PShift_create(shift, harm->sampleRate);
 	harm->activeVoices[harm->numVoices - 1] = true;
 }
 
 void Harmonizer_enableVoice(Harmonizer* harm, int voice) {
-	//~ printf("enabling %d\n", voice);
-	//~ float mixAmnt = harm->mixAmounts[voice];
-	//~ harm->mixAmounts[voice] = 0;
-	//~ printf("ramping up\n");
 	harm->activeVoices[voice] = true;
-	//~ while (harm->mixAmounts[voice] < mixAmnt) {
-		//~ harm->mixAmounts[voice] += 0.001;
-		//~ time_sleep(0.0001);
-	//~ }
-	
-	//~ printf("done ramping up\n");
+	//~ PShift_setGain(harm->shifters[voice], 1);
 }
 
 void Harmonizer_disableVoice(Harmonizer* harm, int voice) {
-	//~ float mixAmnt = harm->mixAmounts[voice];
-	//~ while (harm->mixAmounts[voice] > 0) {
-		//~ harm->mixAmounts[voice] -= 0.001;
-		//~ time_sleep(0.0001);
-	//~ }
-	harm->activeVoices[voice] = false;
-	//~ harm->mixAmounts[voice] = mixAmnt;
+	//~ harm->activeVoices[voice] = false;
+	PShift_setGain(harm->shifters[voice], 0);
 }
 
-void Harmonizer_setActiveVoices(Harmonizer* harm, int* activeVoices, int numActive) {
-	for (unsigned int i = 0; i < harm->numVoices; ++i) {
-		if (intInArray(activeVoices, numActive, i)) {
-			Harmonizer_enableVoice(harm, i);
-		}
-		else {
-			Harmonizer_disableVoice(harm, i);
-		}
+void Harmonizer_setActiveVoices(Harmonizer* harm, int numActive) {
+	unsigned int i = 0;
+	// enable active voices
+	for (i = 0; i < numActive; ++i) {
+		Harmonizer_enableVoice(harm, i);
 	}
+	// disable all other voices
+	for (i = numActive; i < harm->numVoices; ++i) {
+		Harmonizer_disableVoice(harm, i);
+	}
+}
+
+void Harmonizer_setVoiceGain(Harmonizer* harm, int voice, float gain) {
+	PShift_setGain(harm->shifters[voice], gain);
+	//~ harm->mixAmounts[voice] = gain;
 }
 
 float Harmonizer_apply(Harmonizer* harm, float sample) {
 	float harmSamp = sample;
 	for (unsigned int i = 0; i < harm->numVoices; ++i) {
 		if (harm->activeVoices[i]) {
-			//~ if (i == 0) {
-				//~ printf("mix amnt: %f\n", harm->mixAmounts[i]);
-			//~ }
-			harmSamp += PShift_apply(harm->voices[i], sample) * harm->mixAmounts[i];
+			harmSamp += PShift_apply(harm->shifters[i], sample) * harm->mixAmounts[i];
 		}
 	}
 	return harmSamp;
@@ -454,9 +484,9 @@ void Harmonizer_destroy(Harmonizer* harm) {
 	free(harm->shiftAmounts);
 	free(harm->mixAmounts);
 	for (unsigned int i = 0; i < harm->numVoices; ++i) {
-		PShift_destroy(harm->voices[i]);
+		PShift_destroy(harm->shifters[i]);
 	}
-	free(harm->voices);
+	free(harm->shifters);
 	free(harm);
 }
 

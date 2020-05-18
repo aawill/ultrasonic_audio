@@ -4,6 +4,7 @@ typedef struct {
 	int echoPin;
 	float minDist;
 	float maxDist;
+	float maxActiveDist;
 	int numReadings;
 
 	int timeoutMicros;
@@ -21,6 +22,7 @@ Sensor* Sensor_create(int _trigPin, int _echoPin, float _minDist, float _maxDist
 	sensor->echoPin = _echoPin;
 	sensor->minDist = _minDist;
 	sensor->maxDist = _maxDist;
+	sensor->maxActiveDist = sensor->maxDist * 0.80;
 	sensor->numReadings = _numReadings;
 
 	// converts cm to microseconds
